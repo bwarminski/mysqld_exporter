@@ -84,11 +84,11 @@ const perfEventsStatementsDigestQueryMySQL = `
 // Global totals query for calculating percentages
 const perfEventsStatementsDigestTotalsQuery = `
 	SELECT
-	    SUM(COUNT_STAR) as TOTAL_COUNT_STAR,
-	    SUM(SUM_TIMER_WAIT) as TOTAL_SUM_TIMER_WAIT,
-	    SUM(SUM_ROWS_AFFECTED) as TOTAL_ROWS_AFFECTED,
-	    SUM(SUM_ROWS_SENT) as TOTAL_ROWS_SENT,
-	    SUM(SUM_ROWS_EXAMINED) as TOTAL_ROWS_EXAMINED
+	    IFNULL(SUM(COUNT_STAR), 0) as TOTAL_COUNT_STAR,
+	    IFNULL(SUM(SUM_TIMER_WAIT), 0) as TOTAL_SUM_TIMER_WAIT,
+	    IFNULL(SUM(SUM_ROWS_AFFECTED), 0) as TOTAL_ROWS_AFFECTED,
+	    IFNULL(SUM(SUM_ROWS_SENT), 0) as TOTAL_ROWS_SENT,
+	    IFNULL(SUM(SUM_ROWS_EXAMINED), 0) as TOTAL_ROWS_EXAMINED
 	  FROM performance_schema.events_statements_summary_by_digest
 	  WHERE SCHEMA_NAME NOT IN ('mysql', 'performance_schema', 'information_schema')
 	    AND LAST_SEEN > DATE_SUB(NOW(), INTERVAL %d SECOND)
@@ -179,11 +179,11 @@ func (ScrapePerfEventsStatementsDigest) Version() float64 {
 
 // DigestTotals holds aggregate totals for percentage calculations
 type DigestTotals struct {
-	TotalCountStar     uint64
-	TotalSumTimerWait  uint64
-	TotalRowsAffected  uint64
-	TotalRowsSent      uint64
-	TotalRowsExamined  uint64
+	TotalCountStar    uint64
+	TotalSumTimerWait uint64
+	TotalRowsAffected uint64
+	TotalRowsSent     uint64
+	TotalRowsExamined uint64
 }
 
 // Scrape collects data from database connection and sends it over channel as prometheus metric.

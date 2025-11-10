@@ -22,6 +22,23 @@ STATICCHECK_IGNORE =
 
 DOCKER_IMAGE_NAME ?= mysqld-exporter
 
+.PHONY: crossbuild
+crossbuild:
+	@echo ">> cross-building binaries for multiple platforms"
+	@mkdir -p .build/linux-amd64 .build/linux-arm64 .build/linux-armv7
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o .build/linux-amd64/mysqld_exporter .
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o .build/linux-arm64/mysqld_exporter .
+	GOOS=linux GOARCH=arm CGO_ENABLED=0 GOARM=7 go build -ldflags="-s -w" -o .build/linux-armv7/mysqld_exporter .
+
+.PHONY: docker-multiarch
+docker-multiarch: crossbuild
+	@echo ">> building and pushing multi-architecture Docker image"
+	docker buildx create --use --name multi-arch-builder || true
+	docker buildx build \
+		--platform linux/amd64,linux/arm64,linux/arm/v7 \
+		-t $(DOCKER_REPO)/$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG) \
+		--push .
+
 .PHONY: test-docker-single-exporter
 test-docker-single-exporter:
 	@echo ">> testing docker image for single exporter"

@@ -120,6 +120,10 @@ collect.perf_schema.eventsstatements                         | 5.6           | C
 collect.perf_schema.eventsstatements.digest_text_limit       | 5.6           | Maximum length of the normalized statement text. (default: 120)
 collect.perf_schema.eventsstatements.limit                   | 5.6           | Limit the number of events statements digests by response time. (default: 250)
 collect.perf_schema.eventsstatements.timelimit               | 5.6           | Limit how old the 'last_seen' events statements can be, in seconds. (default: 86400)
+collect.perf_schema.eventsstatements.digest                  | 5.6           | Collect derived ps-digest metrics from performance_schema.events_statements_summary_by_digest.
+collect.perf_schema.eventsstatements.digest.digest_text_limit | 5.6          | Maximum length of the normalized statement text for digest collector. (default: 120)
+collect.perf_schema.eventsstatements.digest.limit            | 5.6           | Limit the number of events statements digests by response time for digest collector. (default: 250)
+collect.perf_schema.eventsstatements.digest.timelimit        | 5.6           | Limit how old the 'last_seen' events statements can be, in seconds for digest collector. (default: 86400)
 collect.perf_schema.eventsstatementssum                      | 5.7           | Collect metrics from performance_schema.events_statements_summary_by_digest summed.
 collect.perf_schema.eventswaits                              | 5.5           | Collect metrics from performance_schema.events_waits_summary_global_by_event_name.
 collect.perf_schema.file_events                              | 5.6           | Collect metrics from performance_schema.file_summary_by_event_name.
