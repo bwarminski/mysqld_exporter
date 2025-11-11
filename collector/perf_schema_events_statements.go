@@ -319,7 +319,7 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 
 	db := instance.getDB()
 	// Timers here are returned in picoseconds.
-	logger.Debug("perf events statements query start", "query", "digest_select")
+	logger.Debug("perf events statements query start", "query", "digest_select", "sql", perfQuery)
 	perfSelectStart := time.Now()
 	perfSchemaEventsStatementsRows, err := db.QueryContext(ctx, perfQuery)
 	if err != nil {
@@ -346,7 +346,7 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 	var totalCount, totalTimerWait, totalRowsAffected, totalRowsSent, totalRowsExamined uint64
 	if *perfEventsStatementsDigestMetrics {
 		totalsQuery := fmt.Sprintf(perfEventsStatementsQueryTotals, *perfEventsStatementsTimeLimit)
-		logger.Debug("perf events statements query start", "query", "digest_totals")
+		logger.Debug("perf events statements query start", "query", "digest_totals", "sql", totalsQuery)
 		totalsStart := time.Now()
 		totalsRows, err := db.QueryContext(ctx, totalsQuery)
 		if err != nil {
