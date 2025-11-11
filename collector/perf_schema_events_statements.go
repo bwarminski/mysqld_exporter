@@ -123,6 +123,19 @@ const perfEventsStatementsQueryMySQL = `
 	  LIMIT %d
 	`
 
+// Global totals query for calculating percentages
+const perfEventsStatementsQueryTotals = `
+	SELECT
+	    IFNULL(SUM(COUNT_STAR), 0) as TOTAL_COUNT_STAR,
+	    IFNULL(SUM(SUM_TIMER_WAIT), 0) as TOTAL_SUM_TIMER_WAIT,
+	    IFNULL(SUM(SUM_ROWS_AFFECTED), 0) as TOTAL_ROWS_AFFECTED,
+	    IFNULL(SUM(SUM_ROWS_SENT), 0) as TOTAL_ROWS_SENT,
+	    IFNULL(SUM(SUM_ROWS_EXAMINED), 0) as TOTAL_ROWS_EXAMINED
+	  FROM performance_schema.events_statements_summary_by_digest
+	  WHERE SCHEMA_NAME NOT IN ('mysql', 'performance_schema', 'information_schema')
+	    AND LAST_SEEN > DATE_SUB(NOW(), INTERVAL %d SECOND)
+	`
+
 // Tunable flags.
 var (
 	perfEventsStatementsLimit = kingpin.Flag(
@@ -137,6 +150,10 @@ var (
 		"collect.perf_schema.eventsstatements.digest_text_limit",
 		"Maximum length of the normalized statement text",
 	).Default("120").Int()
+	perfEventsStatementsDigestMetrics = kingpin.Flag(
+		"collect.perf_schema.eventsstatements.digest_metrics",
+		"Enable derived digest percentage and average metrics",
+	).Default("false").Bool()
 )
 
 // Metric descriptors.
@@ -216,6 +233,53 @@ var (
 		"A summary of statement latency by digest",
 		[]string{"schema", "digest", "digest_text"}, nil,
 	)
+
+	// Digest-derived metric descriptors (enabled via --collect.perf_schema.eventsstatements.digest_metrics)
+	performanceSchemaEventsStatementsDigestCountPctDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_count_pct"),
+		"The percentage of total query count by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestTimerPctDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_timer_pct"),
+		"The percentage of total query time by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestAvgTimerMsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_avg_timer_ms"),
+		"The average query time in milliseconds by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestRowsAffectedPctDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_rows_affected_pct"),
+		"The percentage of total rows affected by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestRowsSentPctDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_rows_sent_pct"),
+		"The percentage of total rows sent by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestRowsExaminedPctDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_rows_examined_pct"),
+		"The percentage of total rows examined by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestAvgRowsAffectedDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_avg_rows_affected"),
+		"The average rows affected per query by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestAvgRowsSentDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_avg_rows_sent"),
+		"The average rows sent per query by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
+	performanceSchemaEventsStatementsDigestAvgRowsExaminedDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, performanceSchema, "events_statements_digest_avg_rows_examined"),
+		"The average rows examined per query by digest.",
+		[]string{"schema", "digest", "digest_text"}, nil,
+	)
 )
 
 // ScrapePerfEventsStatements collects from `performance_schema.events_statements_summary_by_digest`.
@@ -260,6 +324,39 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 	}
 	defer perfSchemaEventsStatementsRows.Close()
 
+	// Collect all data for digest calculations if enabled
+	type digestRow struct {
+		schemaName, digest, digestText       string
+		count, queryTime, lockTime, cpuTime  uint64
+		errors, warnings                     uint64
+		rowsAffected, rowsSent, rowsExamined uint64
+		tmpTables, tmpDiskTables             uint64
+		sortMergePasses, sortRows            uint64
+		noIndexUsed                          uint64
+		quantile95, quantile99, quantile999  uint64
+	}
+
+	var allRows []digestRow
+
+	// Get totals from the full table (not limited) for accurate percentage calculations
+	var totalCount, totalTimerWait, totalRowsAffected, totalRowsSent, totalRowsExamined uint64
+	if *perfEventsStatementsDigestMetrics {
+		totalsQuery := fmt.Sprintf(perfEventsStatementsQueryTotals, *perfEventsStatementsTimeLimit)
+
+		totalsRows, err := db.QueryContext(ctx, totalsQuery)
+		if err != nil {
+			return err
+		}
+		defer totalsRows.Close()
+
+		if totalsRows.Next() {
+			err := totalsRows.Scan(&totalCount, &totalTimerWait, &totalRowsAffected, &totalRowsSent, &totalRowsExamined)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
 	var (
 		schemaName, digest, digestText       string
 		count, queryTime, lockTime, cpuTime  uint64
@@ -270,6 +367,7 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 		noIndexUsed                          uint64
 		quantile95, quantile99, quantile999  uint64
 	)
+
 	for perfSchemaEventsStatementsRows.Next() {
 		var err error
 		if mysqlVersion8028 {
@@ -284,68 +382,173 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 		if err != nil {
 			return err
 		}
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsDesc, prometheus.CounterValue, float64(count),
+
+		// Store row data for potential digest calculations
+		row := digestRow{
 			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsTimeDesc, prometheus.CounterValue, float64(queryTime)/picoSeconds,
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsLockTimeDesc, prometheus.CounterValue, float64(lockTime)/picoSeconds,
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsCpuTimeDesc, prometheus.CounterValue, float64(cpuTime)/picoSeconds,
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsErrorsDesc, prometheus.CounterValue, float64(errors),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsWarningsDesc, prometheus.CounterValue, float64(warnings),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsRowsAffectedDesc, prometheus.CounterValue, float64(rowsAffected),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsRowsSentDesc, prometheus.CounterValue, float64(rowsSent),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsRowsExaminedDesc, prometheus.CounterValue, float64(rowsExamined),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsTmpTablesDesc, prometheus.CounterValue, float64(tmpTables),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsTmpDiskTablesDesc, prometheus.CounterValue, float64(tmpDiskTables),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsSortMergePassesDesc, prometheus.CounterValue, float64(sortMergePasses),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsSortRowsDesc, prometheus.CounterValue, float64(sortRows),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			performanceSchemaEventsStatementsNoIndexUsedDesc, prometheus.CounterValue, float64(noIndexUsed),
-			schemaName, digest, digestText,
-		)
-		ch <- prometheus.MustNewConstSummary(performanceSchemaEventsStatementsLatency, count, float64(queryTime)/picoSeconds, map[float64]float64{
-			95:  float64(quantile95) / picoSeconds,
-			99:  float64(quantile99) / picoSeconds,
-			999: float64(quantile999) / picoSeconds,
-		}, schemaName, digest, digestText)
+			count, queryTime, lockTime, cpuTime,
+			errors, warnings,
+			rowsAffected, rowsSent, rowsExamined,
+			tmpTables, tmpDiskTables,
+			sortMergePasses, sortRows,
+			noIndexUsed,
+			quantile95, quantile99, quantile999,
+		}
+		allRows = append(allRows, row)
 	}
+
+	// Now emit all metrics for each row
+	for _, row := range allRows {
+		labels := []string{row.schemaName, row.digest, row.digestText}
+
+		// Emit existing performance_schema metrics
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsDesc, prometheus.CounterValue, float64(row.count),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsTimeDesc, prometheus.CounterValue, float64(row.queryTime)/picoSeconds,
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsLockTimeDesc, prometheus.CounterValue, float64(row.lockTime)/picoSeconds,
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsCpuTimeDesc, prometheus.CounterValue, float64(row.cpuTime)/picoSeconds,
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsErrorsDesc, prometheus.CounterValue, float64(row.errors),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsWarningsDesc, prometheus.CounterValue, float64(row.warnings),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsRowsAffectedDesc, prometheus.CounterValue, float64(row.rowsAffected),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsRowsSentDesc, prometheus.CounterValue, float64(row.rowsSent),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsRowsExaminedDesc, prometheus.CounterValue, float64(row.rowsExamined),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsTmpTablesDesc, prometheus.CounterValue, float64(row.tmpTables),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsTmpDiskTablesDesc, prometheus.CounterValue, float64(row.tmpDiskTables),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsSortMergePassesDesc, prometheus.CounterValue, float64(row.sortMergePasses),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsSortRowsDesc, prometheus.CounterValue, float64(row.sortRows),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			performanceSchemaEventsStatementsNoIndexUsedDesc, prometheus.CounterValue, float64(row.noIndexUsed),
+			labels...,
+		)
+		ch <- prometheus.MustNewConstSummary(performanceSchemaEventsStatementsLatency, row.count, float64(row.queryTime)/picoSeconds, map[float64]float64{
+			95:  float64(row.quantile95) / picoSeconds,
+			99:  float64(row.quantile99) / picoSeconds,
+			999: float64(row.quantile999) / picoSeconds,
+		}, labels...)
+
+		// Emit digest-derived metrics if enabled
+		if *perfEventsStatementsDigestMetrics {
+			// PCT_COUNT_STAR: COUNT_STAR / total_count_star
+			if totalCount > 0 {
+				pctCountStar := float64(row.count) / float64(totalCount)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestCountPctDesc, prometheus.GaugeValue, pctCountStar,
+					labels...,
+				)
+			}
+
+			// PCT_TIMER_WAIT: SUM_TIMER_WAIT / total_timer_wait
+			if totalTimerWait > 0 {
+				pctTimerWait := float64(row.queryTime) / float64(totalTimerWait)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestTimerPctDesc, prometheus.GaugeValue, pctTimerWait,
+					labels...,
+				)
+			}
+
+			// AVG_TIMER_WAIT_MS: SUM_TIMER_WAIT / COUNT_STAR / 1000 / 1000 / 1000
+			if row.count > 0 {
+				avgTimerWaitMs := float64(row.queryTime) / float64(row.count) / picoSeconds * 1000
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestAvgTimerMsDesc, prometheus.GaugeValue, avgTimerWaitMs,
+					labels...,
+				)
+			}
+
+			// PCT_ROWS_AFFECTED: SUM_ROWS_AFFECTED / total_rows_affected
+			if totalRowsAffected > 0 {
+				pctRowsAffected := float64(row.rowsAffected) / float64(totalRowsAffected)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestRowsAffectedPctDesc, prometheus.GaugeValue, pctRowsAffected,
+					labels...,
+				)
+			}
+
+			// AVG_ROWS_AFFECTED: SUM_ROWS_AFFECTED / COUNT_STAR
+			if row.count > 0 {
+				avgRowsAffected := float64(row.rowsAffected) / float64(row.count)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestAvgRowsAffectedDesc, prometheus.GaugeValue, avgRowsAffected,
+					labels...,
+				)
+			}
+
+			// PCT_ROWS_SENT: SUM_ROWS_SENT / total_rows_sent
+			if totalRowsSent > 0 {
+				pctRowsSent := float64(row.rowsSent) / float64(totalRowsSent)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestRowsSentPctDesc, prometheus.GaugeValue, pctRowsSent,
+					labels...,
+				)
+			}
+
+			// AVG_ROWS_SENT: SUM_ROWS_SENT / COUNT_STAR
+			if row.count > 0 {
+				avgRowsSent := float64(row.rowsSent) / float64(row.count)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestAvgRowsSentDesc, prometheus.GaugeValue, avgRowsSent,
+					labels...,
+				)
+			}
+
+			// PCT_ROWS_EXAMINED: SUM_ROWS_EXAMINED / total_rows_examined
+			if totalRowsExamined > 0 {
+				pctRowsExamined := float64(row.rowsExamined) / float64(totalRowsExamined)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestRowsExaminedPctDesc, prometheus.GaugeValue, pctRowsExamined,
+					labels...,
+				)
+			}
+
+			// AVG_ROWS_EXAMINED: SUM_ROWS_EXAMINED / COUNT_STAR
+			if row.count > 0 {
+				avgRowsExamined := float64(row.rowsExamined) / float64(row.count)
+				ch <- prometheus.MustNewConstMetric(
+					performanceSchemaEventsStatementsDigestAvgRowsExaminedDesc, prometheus.GaugeValue, avgRowsExamined,
+					labels...,
+				)
+			}
+		}
+	}
+
 	return nil
 }
 
