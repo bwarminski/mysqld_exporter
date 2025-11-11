@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/blang/semver/v4"
@@ -318,11 +319,14 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 
 	db := instance.getDB()
 	// Timers here are returned in picoseconds.
+	logger.Debug("perf events statements query start", "query", "digest_select")
+	perfSelectStart := time.Now()
 	perfSchemaEventsStatementsRows, err := db.QueryContext(ctx, perfQuery)
 	if err != nil {
 		return err
 	}
 	defer perfSchemaEventsStatementsRows.Close()
+	logger.Debug("perf events statements query done", "query", "digest_select", "duration", time.Since(perfSelectStart))
 
 	// Collect all data for digest calculations if enabled
 	type digestRow struct {
@@ -342,7 +346,8 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 	var totalCount, totalTimerWait, totalRowsAffected, totalRowsSent, totalRowsExamined uint64
 	if *perfEventsStatementsDigestMetrics {
 		totalsQuery := fmt.Sprintf(perfEventsStatementsQueryTotals, *perfEventsStatementsTimeLimit)
-
+		logger.Debug("perf events statements query start", "query", "digest_totals")
+		totalsStart := time.Now()
 		totalsRows, err := db.QueryContext(ctx, totalsQuery)
 		if err != nil {
 			return err
@@ -355,6 +360,7 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 				return err
 			}
 		}
+		logger.Debug("perf events statements query done", "query", "digest_totals", "duration", time.Since(totalsStart))
 	}
 
 	var (
@@ -368,6 +374,7 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 		quantile95, quantile99, quantile999  uint64
 	)
 
+	rowCount := 0
 	for perfSchemaEventsStatementsRows.Next() {
 		var err error
 		if mysqlVersion8028 {
@@ -395,9 +402,12 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 			quantile95, quantile99, quantile999,
 		}
 		allRows = append(allRows, row)
+		rowCount++
 	}
+	logger.Debug("perf events statements rows read", "rows", rowCount, "duration", time.Since(perfSelectStart))
 
 	// Now emit all metrics for each row
+	emitStart := time.Now()
 	for _, row := range allRows {
 		labels := []string{row.schemaName, row.digest, row.digestText}
 
@@ -548,6 +558,7 @@ func (ScrapePerfEventsStatements) Scrape(ctx context.Context, instance *instance
 			}
 		}
 	}
+	logger.Debug("perf events statements metrics emitted", "rows", rowCount, "duration", time.Since(emitStart))
 
 	return nil
 }
