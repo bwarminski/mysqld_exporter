@@ -179,7 +179,13 @@ func (e *Exporter) scrape(ctx context.Context, ch chan<- prometheus.Metric) floa
 			label := "collect." + scraper.Name()
 			scrapeTime := time.Now()
 			collectorSuccess := 1.0
-			if err := scraper.Scrape(ctx, instance, ch, e.logger.With("scraper", scraper.Name())); err != nil {
+
+			// Debug timing instrumentation
+			start := time.Now()
+			err := scraper.Scrape(ctx, instance, ch, e.logger.With("scraper", scraper.Name()))
+			e.logger.Debug("scraper timing", "scraper", scraper.Name(), "duration", time.Since(start), "err", err)
+
+			if err != nil {
 				e.logger.Error("Error from scraper", "scraper", scraper.Name(), "target", e.getTargetFromDsn(), "err", err)
 				collectorSuccess = 0.0
 			}

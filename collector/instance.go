@@ -41,7 +41,7 @@ func newInstance(dsn string) (*instance, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(1)
 	i.db = db
 
